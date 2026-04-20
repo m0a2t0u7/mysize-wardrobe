@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>マイサイズ ワードローブ</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+/* ── Firebase 初期化（有休アプリと同じプロジェクト） ── */
+const FB_CONFIG = {
+  apiKey: "AIzaSyA2k1bYVflOGRsH7nAkaPXeHBsTjC_Kad4",
+  authDomain: "pantry-home-f4e36.firebaseapp.com",
+  projectId: "pantry-home-f4e36",
+  storageBucket: "pantry-home-f4e36.firebasestorage.app",
+  messagingSenderId: "884734556181",
+  appId: "1:884734556181:web:cedd85e384223ecad2361c"
+};
+
+if (!firebase.apps.length) firebase.initializeApp(FB_CONFIG);
+const auth = firebase.auth();
+const db   = firebase.firestore();
+
+/* ── パス定義 ── */
+const profilesRef  = (uid) => db.doc(`users/${uid}/mysize/profiles_v2`);
+const wardrobeRef  = (uid) => db.collection(`users/${uid}/wardrobe_items`);
+const wardrobeDoc  = (uid, id) => db.doc(`users/${uid}/wardrobe_items/${id}`);
+
+/* ── UIコンポーネント ── */
+const SliderControl = ({ label, value, min, max, onChange, colorClass }) => (
+  <div className="w-full">
+    <div className="flex justify-between mb-1">
+      <label className="text-[11px] font-bold text-gray-700">{label}</label>
+      <span className="text-[11px] font-bold text-gray-700">{value} cm</span>
+    </div>
+    <input type="range" min={min} max={max} step="0.5" value={value}
+      onChange={(e) => onChange(Number(e.target.value))}
+      className={`w-full h-2 rounded-lg appearance-none cursor-pointer ${colorClass}`}
+    />
+  </div>
+);
+
+const NumberCard = ({ label, value, unit = "cm", onChange }) => (
+  <div className="bg-white border border-gray-200 rounded-xl p-3 shadow-sm hover:border-blue-400 transition-colors focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-500">
+    <div className="text-[10px] font-bold text-gray-500 mb-1">{label}</div>
+    <div className="flex items-baseline gap-1">
+      <input
+        type="number"
+        step="0.5"
+        value={value === '' || value === undefined ? '' : value}
+        onChange={(e) => onChange(e.target.value === '' ? '' : Number(e.target.value))}
+        placeholder="+ 入力"
+        className="w-full text-lg font-bold text-gray-800 focus:outline-none bg-transparent placeholder-gray-300"
+      />
+      {(value !== '' && value !== undefined) && <span className="text-xs font-bold text-gray-600">{unit}</span>}
+    </div>
+  </div>
+);
+
+const StrokeText = ({ x, y, anchor = "middle", text, strokeColor }) => (
+  <g>
+    <text x={x} y={y} textAnchor={anchor} fontSize="12" fontWeight="bold" stroke="white" strokeWidth="4" strokeLinejoin="round" fill="white">{text}</text>
+    <text x={x} y={y} textAnchor={anchor} fontSize="12" fontWeight="bold" fill={strokeColor}>{text}</text>
+  </g>
+);
+
+/* ── メインApp ── */
+export default function App() {
+  const [user, setUser]           = useState(null);
+  const [isAnonymous, setIsAnonymous] = useState(true);
+  const [activeTab, setActiveTab] = useState('simulator');
+
+  const createNewProfile = (name = '新しいプロフィール') => ({
+    id: Date.now().toString(),
+    name, height: 173, weight: 65, memo: '',
+    shoulder: 45, torso: 65, inseam: 75,
+    chestCirc: 95, waistCirc: 82, hipCirc: 100, thigh: 55,
+    armLength: '', wrist: '', hand: '', footSize: '', footWidth: '', shoeSize: ''
+  });
+
+  const defaultProfile = { ...createNewProfile('自分用'), id: 'default' };
+
+  const [profiles, setProfiles]           = useState([defaultProfile]);
+  const [activeProfileId, setActiveProfileId] = useState('default');
+  const activeProfile = profiles.find(p => p.id === activeProfileId) || profiles[0];
+
+  const [cloth, setCloth] = useState({
+    id: null, type: 'tshirt', name: '新規アイテム',
+    shoulder: 50, chest: 52, length: 68, sleeve: 22,
+    waistCirc: 85, hipCirc: 105, watari: 33, rise: 28, hem: 20, inseam: 72
+  });
+
+  const [wardrobe, setWardrobe]     = useState([]);
+  const [saveMessage, setSaveMessage] = useState('');
+  const [importText, setImportText] = useState('');
+  const profileSaveTimer = useRef(null);
+
+  const [isPresetModalOpen, setIsPresetModalOpen] = useState(false);
+  const [selectedPresets, setSelectedPresets]     = useState([]);
+
+  const PRESETS = [
+    { id: 'u_m',  type: 'tshirt', name: 'UNIQLO クルーネックT (M)',  shoulder: 46.5, chest: 54, length: 68, sleeve: 22, waistCirc: 85,  hipCirc: 105, watari: 33, rise: 28, hem: 20, inseam: 72 },
+    { id: 'u_l',  type: 'tshirt', name: 'UNIQLO クルーネックT (L)',  shoulder: 48,   chest: 57, length: 71, sleeve: 23, waistCirc: 85,  hipCirc: 105, watari: 33, rise: 28, hem: 20, inseam: 72 },
+    { id: 'u_xl', type: 'tshirt', name: 'UNIQLO クルーネックT (XL)', shoulder: 50,   chest: 61, length: 74, sleeve: 24, waistCirc: 85,  hipCirc: 105, watari: 33, rise: 28, hem: 20, inseam: 72 },
+    { id: 'g_m',  type: 'pants',  name: 'GU シェフパンツ (M)',       shoulder: 50,   chest: 52, length: 68, sleeve: 22, waistCirc: 80,  hipCirc: 108, watari: 34, rise: 29, hem: 19, inseam: 70 },
+    { id: 'g_l',  type: 'pants',  name: 'GU シェフパンツ (L)',       shoulder: 50,   chest: 52, length: 68, sleeve: 22, waistCirc: 88,  hipCirc: 112, watari: 35, rise: 30, hem: 20, inseam: 72 },
+  ];
+
+  /* ── 認証 ── */
+  useEffect(() => {
+    const unsubscribe = auth.onAuthStateChanged((currentUser) => {
+      setUser(currentUser);
+      setIsAnonymous(currentUser ? currentUser.isAnonymous : true);
+    });
+    auth.signInAnonymously().catch(e => console.error('anon sign-in error:', e));
+    return () => unsubscribe();
+  }, []);
+
+  const handleGoogleLogin = () => {
+    const provider = new firebase.auth.GoogleAuthProvider();
+    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+    if (isMobile) {
+      auth.signInWithRedirect(provider);
+    } else {
+      auth.signInWithPopup(provider).catch(() => auth.signInWithRedirect(provider));
+    }
+  };
+
+  const handleLogout = async () => {
+    if (!window.confirm('ログアウトしますか？')) return;
+    await auth.signOut();
+    setProfiles([defaultProfile]);
+    setWardrobe([]);
+    auth.signInAnonymously().catch(e => console.error(e));
+  };
+
+  /* ── データ同期 ── */
+  useEffect(() => {
+    if (!user) return;
+
+    const unsubProfiles = profilesRef(user.uid).onSnapshot(async (docSnap) => {
+      if (docSnap.exists) {
+        const data = docSnap.data();
+        setProfiles(data.list || [defaultProfile]);
+        setActiveProfileId(data.activeId || data.list[0].id);
+        localStorage.setItem('mysize_profiles_backup', JSON.stringify(data));
+      } else {
+        const backup = localStorage.getItem('mysize_profiles_backup');
+        if (backup) {
+          try {
+            const parsed = JSON.parse(backup);
+            setProfiles(parsed.list);
+            setActiveProfileId(parsed.activeId);
+            profilesRef(user.uid).set(parsed);
+          } catch(e) {}
+        }
+      }
+    }, err => console.error(err));
+
+    const unsubWardrobe = wardrobeRef(user.uid).onSnapshot((snapshot) => {
+      const items = [];
+      snapshot.forEach(doc => items.push({ id: doc.id, ...doc.data() }));
+      if (items.length > 0) {
+        setWardrobe(items);
+        localStorage.setItem('mysize_wardrobe_backup', JSON.stringify(items));
+      } else {
+        const backup = localStorage.getItem('mysize_wardrobe_backup');
+        if (backup) {
+          try {
+            const parsed = JSON.parse(backup);
+            if (parsed.length > 0) {
+              setWardrobe(parsed);
+              parsed.forEach(item => {
+                const itemData = { ...item }; delete itemData.id;
+                wardrobeRef(user.uid).add(itemData);
+              });
+            }
+          } catch(e) {}
+        }
+      }
+    }, err => console.error(err));
+
+    return () => { unsubProfiles(); unsubWardrobe(); };
+  }, [user]);
+
+  const saveProfilesData = (newList, newActiveId) => {
+    const data = { list: newList, activeId: newActiveId };
+    localStorage.setItem('mysize_profiles_backup', JSON.stringify(data));
+    if (user) {
+      if (profileSaveTimer.current) clearTimeout(profileSaveTimer.current);
+      profileSaveTimer.current = setTimeout(() => {
+        profilesRef(user.uid).set(data).catch(e => console.error(e));
+      }, 500);
+    }
+  };
+
+  const handleProfileChange = (key, value) => {
+    const newProfiles = profiles.map(p => p.id === activeProfileId ? { ...p, [key]: value } : p);
+    setProfiles(newProfiles);
+    saveProfilesData(newProfiles, activeProfileId);
+  };
+
+  const handleAddProfile = () => {
+    const newP = createNewProfile(`プロフィール ${profiles.length + 1}`);
+    const newList = [...profiles, newP];
+    setProfiles(newList); setActiveProfileId(newP.id);
+    saveProfilesData(newList, newP.id);
+  };
+
+  const handleDeleteProfile = () => {
+    if (profiles.length <= 1) return alert('最後のプロフィールは削除できません。');
+    if (!window.confirm(`「${activeProfile.name}」を削除しますか？`)) return;
+    const newList = profiles.filter(p => p.id !== activeProfileId);
+    setProfiles(newList); setActiveProfileId(newList[0].id);
+    saveProfilesData(newList, newList[0].id);
+  };
+
+  const handleClothChange = (key, value) => setCloth({ ...cloth, [key]: value });
+
+  const handleSaveCloth = async () => {
+    if (!user) return;
+    const itemData = { ...cloth }; delete itemData.id;
+    if (cloth.id) {
+      await wardrobeDoc(user.uid, cloth.id).update(itemData);
+      showSaveMessage('上書き保存しました！');
+    } else {
+      const docRef = await wardrobeRef(user.uid).add(itemData);
+      setCloth({ ...cloth, id: docRef.id });
+      showSaveMessage('新しく保存しました！');
+    }
+  };
+
+  const handleSaveAsNew = async () => {
+    if (!user) return;
+    const itemData = { ...cloth }; delete itemData.id;
+    const docRef = await wardrobeRef(user.uid).add(itemData);
+    setCloth({ ...cloth, id: docRef.id });
+    showSaveMessage('別アイテムとして保存しました！');
+  };
+
+  const openPresetModal = () => { setSelectedPresets([]); setIsPresetModalOpen(true); };
+
+  const handleSaveSelectedPresets = async () => {
+    if (!user) return;
+    setIsPresetModalOpen(false);
+    const itemsToAdd = PRESETS.filter(p => selectedPresets.includes(p.id));
+    for (const item of itemsToAdd) {
+      const data = { ...item }; delete data.id;
+      await wardrobeRef(user.uid).add(data);
+    }
+    showSaveMessage(`${itemsToAdd.length}件のアイテムを追加しました！`);
+  };
+
+  const showSaveMessage = (msg) => { setSaveMessage(msg); setTimeout(() => setSaveMessage(''), 3000); };
+  const loadWardrobeItem = (item) => { setCloth(item); setActiveTab('simulator'); };
+  const deleteWardrobeItem = async (id) => {
+    if (user) await wardrobeDoc(user.uid, id).delete();
+  };
+
+  const getExportDataString = () => JSON.stringify({ profiles, activeProfileId, wardrobe }, null, 2);
+  const handleExportFile = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([getExportDataString()], { type: 'application/json' }));
+    a.download = 'mysize_wardrobe_data.json'; a.click();
+  };
+  const handleImportData = async (dataString) => {
+    try {
+      const data = JSON.parse(dataString);
+      if (data.profiles) {
+        setProfiles(data.profiles);
+        setActiveProfileId(data.activeProfileId || data.profiles[0].id);
+        if (user) await profilesRef(user.uid).set({ list: data.profiles, activeId: data.activeProfileId });
+      }
+      if (data.wardrobe && user) {
+        for (const item of data.wardrobe) {
+          const itemData = { ...item }; delete itemData.id;
+          await wardrobeRef(user.uid).add(itemData);
+        }
+      }
+      alert('読み込み完了'); setImportText('');
+    } catch(err) { alert('形式が正しくありません。'); }
+  };
+
+  /* ── 描画計算 ── */
+  const cx = 250; const cy = 120; const scale = 2.5;
+  const neckHalf = 8 * scale; const shoulderDrop = 2 * scale; const armhole = 22 * scale;
+
+  const pChestFlat = (activeProfile.chestCirc || 90) / 2;
+  const pWaistFlat = (activeProfile.waistCirc || 80) / 2;
+  const pThighFlat = (activeProfile.thigh || pWaistFlat * 1.2) / 2;
+  const pShoulder  = activeProfile.shoulder || 45;
+  const pTorso     = activeProfile.torso || 65;
+  const pInseam    = activeProfile.inseam || 75;
+
+  const bodyUpperPoints = [
+    [-neckHalf, 0], [-pShoulder * scale / 2, shoulderDrop], [-pChestFlat * scale / 2, armhole],
+    [-pWaistFlat * scale / 2, pTorso * scale - 5*scale], [pWaistFlat * scale / 2, pTorso * scale - 5*scale],
+    [pChestFlat * scale / 2, armhole], [pShoulder * scale / 2, shoulderDrop], [neckHalf, 0]
+  ].map(p => `${cx + p[0]},${cy + p[1]}`).join(' ');
+
+  const legCenter = -pThighFlat * scale / 2;
+  const ankleFlat = 11 / 2;
+  const legPoints = [
+    [-pWaistFlat * scale / 2, pTorso * scale - 5*scale], [-pThighFlat * scale, pTorso * scale],
+    [legCenter - ankleFlat * scale, (pTorso + pInseam) * scale], [legCenter + ankleFlat * scale, (pTorso + pInseam) * scale],
+    [0, pTorso * scale - 2*scale],
+    [-legCenter - ankleFlat * scale, (pTorso + pInseam) * scale], [-legCenter + ankleFlat * scale, (pTorso + pInseam) * scale],
+    [pThighFlat * scale, pTorso * scale], [pWaistFlat * scale / 2, pTorso * scale - 5*scale]
+  ].map(p => `${cx + p[0]},${cy + p[1]}`).join(' ');
+
+  const isOuter = cloth.type === 'outer';
+  const outerMargin = isOuter ? 2 * scale : 0;
+  const sleeveTopX = (cloth.shoulder * scale / 2) + (cloth.sleeve * scale * 0.8) + outerMargin;
+  const sleeveTopY = shoulderDrop + (cloth.sleeve * scale * 0.4);
+  const sleeveWidth = cloth.type === 'tshirt' ? 18 * scale : 14 * scale;
+  const sleeveBotX = sleeveTopX - sleeveWidth * 0.3;
+  const sleeveBotY = sleeveTopY + sleeveWidth;
+  const clothArmhole = armhole + Math.max(0, (cloth.chest - pChestFlat) * 0.4 * scale);
+
+  const topPoints = [
+    [-neckHalf - 4 - outerMargin, 0], [-(cloth.shoulder * scale / 2) - outerMargin, shoulderDrop - 2],
+    [-sleeveTopX, sleeveTopY - 2], [-sleeveBotX, sleeveBotY],
+    [-(cloth.chest * scale / 2) - outerMargin, clothArmhole], [-(cloth.chest * scale / 2) - outerMargin, cloth.length * scale],
+    [(cloth.chest * scale / 2) + outerMargin, cloth.length * scale], [(cloth.chest * scale / 2) + outerMargin, clothArmhole],
+    [sleeveBotX, sleeveBotY], [sleeveTopX, sleeveTopY - 2],
+    [(cloth.shoulder * scale / 2) + outerMargin, shoulderDrop - 2], [neckHalf + 4 + outerMargin, 0]
+  ].map(p => `${cx + p[0]},${cy + p[1]}`).join(' ');
+
+  const cWaistFlat = (cloth.waistCirc || 80) / 2;
+  const cHipFlat   = (cloth.hipCirc  || 100) / 2;
+  const cWatari = cloth.watari || 33;
+  const cHem    = cloth.hem    || 20;
+  const cRise   = cloth.rise   || 28;
+  const cInseam = cloth.inseam || 70;
+
+  const pantsTopY = pTorso * scale - cRise * scale;
+  const pantsBotY = pTorso * scale + cInseam * scale;
+  const pantsLegCenter = -cWatari / 2 * scale;
+
+  const bottomPoints = [
+    [-cWaistFlat * scale / 2, pantsTopY], [-cHipFlat * scale / 2, pantsTopY + cRise * 0.4 * scale],
+    [-cWatari * scale, pTorso * scale], [pantsLegCenter - cHem / 2 * scale, pantsBotY],
+    [pantsLegCenter + cHem / 2 * scale, pantsBotY], [0, pTorso * scale + 2*scale],
+    [-pantsLegCenter - cHem / 2 * scale, pantsBotY], [-pantsLegCenter + cHem / 2 * scale, pantsBotY],
+    [cWatari * scale, pTorso * scale], [cHipFlat * scale / 2, pantsTopY + cRise * 0.4 * scale],
+    [cWaistFlat * scale / 2, pantsTopY]
+  ].map(p => `${cx + p[0]},${cy + p[1]}`).join(' ');
+
+  let diff = 0;
+  if (['tshirt', 'longsleeve', 'outer'].includes(cloth.type)) {
+    diff = (cloth.chest * 2) - (activeProfile.chestCirc || 90);
+  } else {
+    diff = (cloth.waistCirc || 80) - (activeProfile.waistCirc || 80);
+  }
+
+  let clothColor = "rgba(59, 130, 246, 0.3)"; let strokeColor = "rgb(37, 99, 235)"; let fitStatus = "ジャスト";
+  if (diff < 4)  { clothColor = "rgba(239, 68, 68, 0.3)";   strokeColor = "rgb(220, 38, 38)";  fitStatus = "タイト"; }
+  else if (diff > 20) { clothColor = "rgba(245, 158, 11, 0.3)"; strokeColor = "rgb(217, 119, 6)"; fitStatus = "オーバーサイズ"; }
+  else if (diff > 10) { clothColor = "rgba(16, 185, 129, 0.3)"; strokeColor = "rgb(5, 150, 105)"; fitStatus = "ややゆとり"; }
+
+  const ProfileSelector = () => (
+    <div className="mb-4 flex items-center gap-2 bg-gray-50 px-3 py-2 rounded-lg border border-gray-200">
+      <label className="text-[11px] font-bold text-gray-700 whitespace-nowrap">着用者</label>
+      <select value={activeProfileId} onChange={(e) => { setActiveProfileId(e.target.value); saveProfilesData(profiles, e.target.value); }}
+        className="flex-1 bg-white border border-gray-300 rounded-md text-sm font-bold py-1 px-2 focus:outline-none focus:border-blue-500">
+        {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+      </select>
+      <button onClick={handleAddProfile} className="text-[11px] bg-white border border-gray-300 px-2 py-1.5 rounded-md shadow-sm hover:bg-gray-100 font-bold whitespace-nowrap">+ 追加</button>
+    </div>
+  );
+
+  return (
+    <div className="max-w-6xl mx-auto p-4 md:p-6 bg-white min-h-screen font-sans">
+
+      {/* ログインヘッダー */}
+      <div className="flex justify-between items-center mb-4 bg-gray-50 p-3 rounded-lg border border-gray-200">
+        <div className="text-xs font-bold text-gray-700 flex items-center gap-2">
+          {!isAnonymous && user ? (
+            <><div className="w-2 h-2 rounded-full bg-green-500"></div>{user.email || 'Googleユーザー'} さん</>
+          ) : (
+            <><div className="w-2 h-2 rounded-full bg-gray-400"></div>お試しモード（端末内保存）</>
+          )}
+        </div>
+        <div>
+          {!isAnonymous && user ? (
+            <button onClick={handleLogout} className="text-[11px] text-gray-600 border border-gray-300 px-3 py-1.5 rounded-md hover:bg-gray-100 font-bold bg-white">ログアウト</button>
+          ) : (
+            <button onClick={handleGoogleLogin} className="text-[11px] text-white bg-blue-600 border border-blue-600 px-3 py-1.5 rounded-md hover:bg-blue-700 font-bold shadow-sm flex items-center gap-1">
+              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+              </svg>
+              Googleログインして同期
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* タブ */}
+      <div className="flex border-b border-gray-200 mb-4 overflow-x-auto whitespace-nowrap">
+        {[['simulator','シミュレーション','blue'],['profile','プロフィール','gray'],['wardrobe',`ワードローブ (${wardrobe.length})`,'green'],['transfer','データ移行','purple']].map(([id,label,color]) => (
+          <button key={id} onClick={() => setActiveTab(id)}
+            className={`py-2 px-4 font-bold text-sm focus:outline-none ${activeTab === id ? `border-b-2 border-${color}-600 text-${color}-600` : 'text-gray-500'}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* シミュレーション */}
+      {activeTab === 'simulator' && (
+        <div className="flex flex-col lg:flex-row gap-6">
+          <div className="w-full lg:w-5/12 flex flex-col gap-4">
+            <ProfileSelector />
+            <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
+              <input type="text" value={cloth.name} onChange={(e) => handleClothChange('name', e.target.value)}
+                className="w-full text-base font-bold bg-transparent border-b border-gray-300 focus:border-blue-500 focus:outline-none mb-3 pb-1" placeholder="アイテム名" />
+              <div className="grid grid-cols-4 gap-2 mb-4">
+                {['tshirt', 'longsleeve', 'outer', 'pants'].map(type => (
+                  <button key={type} onClick={() => handleClothChange('type', type)}
+                    className={`py-1.5 text-[10px] font-bold rounded-md ${cloth.type === type ? 'bg-blue-600 text-white' : 'bg-white border border-gray-300 text-gray-600'}`}>
+                    {{ tshirt: 'Tシャツ', longsleeve: '長袖', outer: 'アウター', pants: 'ズボン' }[type]}
+                  </button>
+                ))}
+              </div>
+              <div className="mb-4">
+                <h3 className="text-[11px] text-gray-500 font-bold mb-2">検証する服の寸法</h3>
+                {['tshirt', 'longsleeve', 'outer'].includes(cloth.type) ? (
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+                    <SliderControl label="肩幅"         value={cloth.shoulder} min={30} max={70} onChange={v => handleClothChange('shoulder', v)} colorClass="bg-blue-100 accent-blue-500" />
+                    <SliderControl label="身幅 (平置き)" value={cloth.chest}   min={30} max={80} onChange={v => handleClothChange('chest', v)}    colorClass="bg-blue-100 accent-blue-500" />
+                    <SliderControl label="着丈"         value={cloth.length}  min={30} max={100} onChange={v => handleClothChange('length', v)}   colorClass="bg-blue-100 accent-blue-500" />
+                    <SliderControl label="袖丈"         value={cloth.sleeve}  min={10} max={70}  onChange={v => handleClothChange('sleeve', v)}   colorClass="bg-blue-100 accent-blue-500" />
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+                    <SliderControl label="ウエスト (商品寸/ぐるり)" value={cloth.waistCirc || 80} min={50} max={130} onChange={v => handleClothChange('waistCirc', v)} colorClass="bg-blue-100 accent-blue-500" />
+                    <SliderControl label="ヒップ (商品寸/ぐるり)"  value={cloth.hipCirc  || 100} min={70} max={140} onChange={v => handleClothChange('hipCirc', v)}  colorClass="bg-blue-100 accent-blue-500" />
+                    <SliderControl label="わたり幅 (平置き)"       value={cloth.watari   || 33}  min={20} max={50}  onChange={v => handleClothChange('watari', v)}   colorClass="bg-blue-100 accent-blue-500" />
+                    <SliderControl label="股上"                   value={cloth.rise     || 28}  min={15} max={45}  onChange={v => handleClothChange('rise', v)}     colorClass="bg-blue-100 accent-blue-500" />
+                    <SliderControl label="裾幅 (平置き)"           value={cloth.hem      || 20}  min={10} max={35}  onChange={v => handleClothChange('hem', v)}      colorClass="bg-blue-100 accent-blue-500" />
+                    <SliderControl label="股下"                   value={cloth.inseam   || 70}  min={30} max={95}  onChange={v => handleClothChange('inseam', v)}   colorClass="bg-blue-100 accent-blue-500" />
+                  </div>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <button onClick={handleSaveCloth} className="flex-1 bg-gray-800 text-white py-2 rounded-md font-bold text-xs hover:bg-gray-700">
+                  {cloth.id ? '上書き保存' : '保存する'}
+                </button>
+                {cloth.id && (
+                  <button onClick={handleSaveAsNew} className="flex-1 border border-gray-800 text-gray-800 py-2 rounded-md font-bold text-xs hover:bg-gray-100">別アイテムとして保存</button>
+                )}
+              </div>
+              {saveMessage && <p className="text-green-600 text-[10px] mt-2 font-bold text-center">{saveMessage}</p>}
+            </div>
+            <div className="p-3 bg-gray-50 rounded-xl border border-gray-200">
+              <p className="text-[11px] text-gray-600 mb-1">フィット感判定 (周囲ゆとり基準):</p>
+              <p className="text-lg font-bold" style={{ color: strokeColor }}>{fitStatus}</p>
+            </div>
+          </div>
+
+          <div className="w-full lg:w-7/12 bg-gray-50 rounded-xl border border-gray-200 flex flex-col items-center justify-center relative overflow-hidden min-h-[500px]">
+            <svg viewBox="0 0 500 650" className="w-full h-full max-h-[700px]">
+              <g>
+                <circle cx={cx} cy={cy - 40} r={30} fill="#e5e7eb" stroke="#9ca3af" strokeWidth="2" />
+                <rect x={cx - neckHalf} y={cy - 10} width={neckHalf * 2} height={10} fill="#e5e7eb" stroke="#9ca3af" strokeWidth="2" strokeDasharray="4" />
+                <polygon points={bodyUpperPoints} fill="#f3f4f6" stroke="#9ca3af" strokeWidth="2" strokeDasharray="4" />
+                <polygon points={legPoints}       fill="#f3f4f6" stroke="#9ca3af" strokeWidth="2" strokeDasharray="4" />
+              </g>
+              {['tshirt', 'longsleeve', 'outer'].includes(cloth.type) ? (
+                <g>
+                  <polygon points={topPoints} fill={clothColor} stroke={strokeColor} strokeWidth="2" />
+                  {isOuter && <line x1={cx} y1={cy} x2={cx} y2={cy + cloth.length * scale} stroke={strokeColor} strokeWidth="2" />}
+                  {cloth.shoulder > pShoulder &&
+                    <StrokeText x={cx - (cloth.shoulder * scale / 2) - 10} y={cy - 15} anchor="end" text={`肩落ち +${(cloth.shoulder - pShoulder) / 2}cm`} strokeColor={strokeColor} />}
+                  {cloth.chest * 2 > (activeProfile.chestCirc || 90) &&
+                    <StrokeText x={cx + (cloth.chest * scale / 2) + 15} y={cy + clothArmhole + 25} anchor="start" text={`ぐるりゆとり +${Math.round((cloth.chest * 2 - (activeProfile.chestCirc || 90)) * 10) / 10}cm`} strokeColor={strokeColor} />}
+                  <StrokeText x={cx} y={cy + cloth.length * scale + 25} anchor="middle" text={`着丈差 ${cloth.length - pTorso > 0 ? `+${cloth.length - pTorso}` : cloth.length - pTorso}cm`} strokeColor={strokeColor} />
+                </g>
+              ) : (
+                <g>
+                  <polygon points={bottomPoints} fill={clothColor} stroke={strokeColor} strokeWidth="2" />
+                  <StrokeText x={cx - (cWaistFlat * scale / 2) - 15} y={pantsTopY + 15} anchor="end" text={`ウエスト位置差 ${pTorso - (pTorso - cRise)}cm`} strokeColor={strokeColor} />
+                  <StrokeText x={cx} y={pantsBotY + 25} anchor="middle" text={`丈差 ${cInseam - pInseam > 0 ? `+${cInseam - pInseam}` : cInseam - pInseam}cm`} strokeColor={strokeColor} />
+                  {cWatari * 2 > (activeProfile.thigh || 50) &&
+                    <StrokeText x={cx + (cWatari * scale) + 15} y={pTorso * scale + 15} anchor="start" text={`太ももゆとり +${Math.round((cWatari * 2 - (activeProfile.thigh || 50)) * 10)/10}cm`} strokeColor={strokeColor} />}
+                </g>
+              )}
+            </svg>
+          </div>
+        </div>
+      )}
+
+      {/* プロフィール */}
+      {activeTab === 'profile' && (
+        <div className="max-w-4xl mx-auto space-y-4">
+          <ProfileSelector />
+          <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
+            <h2 className="text-sm font-bold text-gray-800 border-b pb-2 mb-3">シミュレーション連動サイズ（必須）</h2>
+            <p className="text-[10px] text-gray-500 mb-3">※周囲（ぐるり）の実寸をそのまま入力してください。</p>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {[['身長','height'],['体重','weight','kg'],['肩幅','shoulder'],['胸囲 (ぐるり)','chestCirc'],['ウエスト (ぐるり)','waistCirc'],['太もも (ぐるり)','thigh'],['胴丈 (首付根〜股間)','torso'],['股下','inseam']].map(([label, key, unit]) => (
+                <NumberCard key={key} label={label} value={activeProfile[key]} unit={unit || 'cm'} onChange={v => handleProfileChange(key, v)} />
+              ))}
+            </div>
+          </div>
+          <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
+            <h2 className="text-sm font-bold text-gray-800 border-b pb-2 mb-3">詳細マイサイズ（記録用）</h2>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {[['ヒップ (ぐるり)','hipCirc'],['腕の長さ','armLength'],['手首','wrist'],['手のひら','hand'],['足長 (実寸)','footSize'],['足幅 (ワイズ幅)','footWidth'],['靴のサイズ','shoeSize']].map(([label, key]) => (
+                <NumberCard key={key} label={label} value={activeProfile[key]} onChange={v => handleProfileChange(key, v)} />
+              ))}
+            </div>
+          </div>
+          <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
+            <h2 className="text-sm font-bold text-gray-800 border-b pb-2 mb-3">基本情報・管理</h2>
+            <div className="mb-3">
+              <label className="block text-[11px] font-bold text-gray-700 mb-1">登録名（表示名）</label>
+              <input type="text" value={activeProfile.name} onChange={e => handleProfileChange('name', e.target.value)} className="w-full md:w-1/2 px-3 py-1.5 border rounded-md text-sm font-bold" />
+            </div>
+            <div className="mb-4">
+              <label className="block text-[11px] font-bold text-gray-700 mb-1">フリーメモ</label>
+              <textarea value={activeProfile.memo} onChange={e => handleProfileChange('memo', e.target.value)} className="w-full px-3 py-2 border rounded-md text-sm h-20" placeholder="サイズ感の傾向やよく買うブランドなど..." />
+            </div>
+            {profiles.length > 1 && (
+              <div className="border-t pt-3 text-right">
+                <button onClick={handleDeleteProfile} className="text-[11px] text-red-500 hover:text-red-700 font-bold px-3 py-1 border border-red-200 rounded-md">このプロフィールを削除する</button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ワードローブ */}
+      {activeTab === 'wardrobe' && (
+        <div className="max-w-4xl mx-auto">
+          <div className="flex justify-between items-center mb-6">
+            <h2 className="text-xl font-bold text-gray-800">保存されたアイテム</h2>
+            <div className="flex gap-2">
+              <button onClick={openPresetModal} className="bg-blue-50 text-blue-600 border border-blue-200 px-3 py-2 rounded-md font-bold text-xs hover:bg-blue-100">定番アイテムを追加</button>
+              <button onClick={() => { setCloth({ id: null, type: 'tshirt', name: '新規アイテム', shoulder: 50, chest: 52, length: 68, sleeve: 22, waistCirc: 85, hipCirc: 105, watari: 33, rise: 28, hem: 20, inseam: 72 }); setActiveTab('simulator'); }}
+                className="bg-blue-600 text-white px-4 py-2 rounded-md font-bold text-sm">+ 新規作成</button>
+            </div>
+          </div>
+
+          {isPresetModalOpen && (
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+              <div className="bg-white rounded-xl p-6 max-w-md w-full shadow-2xl">
+                <h3 className="text-lg font-bold text-gray-800 mb-4">追加するアイテムを選択</h3>
+                <div className="space-y-2 mb-6 max-h-[60vh] overflow-y-auto pr-2">
+                  {PRESETS.map(preset => (
+                    <label key={preset.id} className="flex items-center gap-3 p-3 hover:bg-gray-50 rounded-lg cursor-pointer border border-gray-200 transition-colors">
+                      <input type="checkbox" className="w-5 h-5 text-blue-600 rounded border-gray-300 cursor-pointer"
+                        checked={selectedPresets.includes(preset.id)}
+                        onChange={(e) => {
+                          if (e.target.checked) setSelectedPresets([...selectedPresets, preset.id]);
+                          else setSelectedPresets(selectedPresets.filter(id => id !== preset.id));
+                        }} />
+                      <div>
+                        <span className="block text-sm font-bold text-gray-800">{preset.name}</span>
+                        <span className="block text-[10px] text-gray-500 mt-0.5">
+                          {preset.type === 'tshirt' ? `肩幅${preset.shoulder} 身幅${preset.chest} 着丈${preset.length}` : `ウエスト${preset.waistCirc} 股下${preset.inseam}`}
+                        </span>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+                <div className="flex gap-3">
+                  <button onClick={() => setIsPresetModalOpen(false)} className="flex-1 bg-gray-100 text-gray-700 py-2.5 rounded-md font-bold text-sm hover:bg-gray-200">キャンセル</button>
+                  <button onClick={handleSaveSelectedPresets} disabled={selectedPresets.length === 0}
+                    className="flex-1 bg-blue-600 text-white py-2.5 rounded-md font-bold text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
+                    {selectedPresets.length > 0 ? `${selectedPresets.length}件を追加する` : '選択してください'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {wardrobe.length === 0 ? (
+            <div className="text-center py-12 bg-gray-50 rounded-xl border border-gray-200"><p className="text-gray-500">まだ保存された服がありません。</p></div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {wardrobe.map(item => (
+                <div key={item.id} className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm hover:shadow-md transition-shadow">
+                  <div className="flex justify-between items-start mb-2">
+                    <h3 className="font-bold text-lg text-gray-800">{item.name}</h3>
+                    <span className="text-xs bg-gray-100 px-2 py-1 rounded text-gray-600 font-bold uppercase">{item.type}</span>
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={() => loadWardrobeItem(item)} className="flex-1 bg-blue-50 text-blue-600 border border-blue-200 py-2 rounded-md font-bold text-sm hover:bg-blue-100">着てみる</button>
+                    <button onClick={() => { if(window.confirm('削除しますか？')) deleteWardrobeItem(item.id); }}
+                      className="px-4 border border-red-200 text-red-500 py-2 rounded-md font-bold text-sm hover:bg-red-50">削除</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* データ移行 */}
+      {activeTab === 'transfer' && (
+        <div className="max-w-3xl mx-auto space-y-6">
+          <div className="bg-gray-50 p-6 rounded-xl border border-gray-200">
+            <h2 className="text-sm font-bold text-purple-800 border-b border-purple-200 pb-2 mb-4">データのエクスポート（書き出し）</h2>
+            <div className="flex flex-col gap-4">
+              <button onClick={handleExportFile} className="bg-purple-600 text-white px-4 py-3 rounded-md font-bold text-sm hover:bg-purple-700">JSONファイルとしてダウンロード</button>
+              <div className="relative">
+                <p className="text-[11px] font-bold text-gray-700 mb-1">テキストとしてコピー</p>
+                <textarea readOnly value={getExportDataString()} className="w-full h-24 px-3 py-2 border rounded-md text-xs font-mono bg-white text-gray-600" />
+              </div>
+            </div>
+          </div>
+          <div className="bg-gray-50 p-6 rounded-xl border border-gray-200">
+            <h2 className="text-sm font-bold text-blue-800 border-b border-blue-200 pb-2 mb-4">データのインポート（読み込み）</h2>
+            <div className="flex flex-col gap-4">
+              <input type="file" accept=".json" onChange={(e) => { const f = e.target.files[0]; if(!f) return; const r = new FileReader(); r.onload = ev => handleImportData(ev.target.result); r.readAsText(f); }}
+                className="block w-full text-sm text-gray-500 file:mr-4 file:py-1 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-bold file:bg-blue-50 file:text-blue-700" />
+              <div className="border-t border-gray-200 pt-4">
+                <textarea value={importText} onChange={e => setImportText(e.target.value)} placeholder="エクスポートしたテキストをペースト" className="w-full h-24 px-3 py-2 border rounded-md text-xs font-mono bg-white mb-2" />
+                <button onClick={() => handleImportData(importText)} className="w-full bg-blue-600 text-white px-4 py-2 rounded-md font-bold text-sm hover:bg-blue-700">テキストデータで上書き更新する</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
