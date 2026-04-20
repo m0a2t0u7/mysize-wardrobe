@@ -76,7 +76,7 @@ const StrokeText = ({ x, y, anchor = "middle", text, strokeColor }) => (
 );
 
 /* ── メインApp ── */
-export default function App() {
+function App() {
   const [user, setUser]           = useState(null);
   const [isAnonymous, setIsAnonymous] = useState(true);
   const [activeTab, setActiveTab] = useState('simulator');
